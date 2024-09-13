@@ -7,7 +7,6 @@ require (
 	github.com/go-estar/config v1.0.0
 	github.com/go-estar/types v1.0.2
 	github.com/go-resty/resty/v2 v2.14.0
-	github.com/modern-go/reflect2 v1.0.2
 	github.com/opentracing/opentracing-go v1.2.0
 	github.com/tidwall/gjson v1.17.3
 )
