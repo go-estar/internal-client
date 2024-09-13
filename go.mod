@@ -3,10 +3,11 @@ module github.com/go-estar/internal-client
 go 1.19
 
 require (
-	github.com/go-estar/base-error v1.0.6
+	github.com/go-estar/base-error v1.0.7
 	github.com/go-estar/config v1.0.0
-	github.com/go-estar/types v1.0.1
+	github.com/go-estar/types v1.0.2
 	github.com/go-resty/resty/v2 v2.14.0
+	github.com/modern-go/reflect2 v1.0.2
 	github.com/opentracing/opentracing-go v1.2.0
 	github.com/tidwall/gjson v1.17.3
 )
@@ -26,6 +27,7 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/spf13/viper v1.19.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
+	github.com/thoas/go-funk v0.9.3 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect

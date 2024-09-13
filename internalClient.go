@@ -6,6 +6,7 @@ import (
 	"github.com/go-estar/base-error"
 	"github.com/go-estar/config"
 	"github.com/go-estar/types/mapUtil"
+	"github.com/go-estar/types/structUtil"
 	"github.com/go-resty/resty/v2"
 	"github.com/opentracing/opentracing-go"
 	"github.com/opentracing/opentracing-go/ext"
@@ -13,111 +14,136 @@ import (
 	"github.com/tidwall/gjson"
 	"reflect"
 	"strings"
+	"time"
 )
 
 var (
-	ErrorParams   = baseError.NewSystem("%s参数错误:%s")
-	ErrorRequest  = baseError.NewSystem("%s连接失败:%s")
-	ErrorResponse = baseError.NewSystem("%s响应失败:%s")
-	ErrorInternal = baseError.NewSystem("%s内部错误:%s")
-	ErrorData     = baseError.NewSystem("%s数据异常")
+	ErrorSign          = baseError.NewSystem("%s%s签名错误:%s")
+	ErrorRequest       = baseError.NewSystem("%s%s连接失败:%s")
+	ErrorResponse      = baseError.NewSystem("%s%s响应失败")
+	ErrorDataNil       = baseError.NewSystem("%s%s数据异常")
+	ErrorDataUnmarshal = baseError.NewSystem("%s%s数据解析失败")
 )
 
 type Signer interface {
-	Sign(map[string]interface{}) error
+	Property() string
+	Sign(interface{}) (string, error)
 }
 
 type BasicAuth struct{ Username, Password string }
 
-type ClientConfig struct {
+type ServerConfig struct {
 	Signer
-	*BasicAuth
-	ClientId          string
-	Server            string
-	Host              string
-	Name              string
-	CodeProperty      string
-	MessageProperty   string
-	DataProperty      string
-	SystemProperty    string
-	ChainProperty     string
-	SucceedCode       interface{}
-	InternalErrorCode interface{}
-}
-type Client struct {
-	*ClientConfig
+	Name            string
+	ApplicationName string
+	CodeProperty    string
+	MessageProperty string
+	DataProperty    string
+	SystemProperty  string
+	ChainProperty   string
+	SucceedCode     interface{}
 }
 
-func NewClient(cc *ClientConfig) *Client {
-	if cc == nil {
-		panic("Client Config 必须设置")
+type ClientConfig struct {
+	Host string
+	*BasicAuth
+	Timeout time.Duration
+}
+type ClientOption func(*ClientConfig)
+
+func WithBasicAuth(val *BasicAuth) ClientOption {
+	return func(opts *ClientConfig) {
+		opts.BasicAuth = val
 	}
-	if cc.Server == "" {
-		panic("Client Server 必须设置")
+}
+func WithTimeout(val time.Duration) ClientOption {
+	return func(opts *ClientConfig) {
+		opts.Timeout = val
+	}
+}
+
+type Client struct {
+	cConf *ClientConfig
+	sConf *ServerConfig
+}
+
+func NewClient(cc *ClientConfig, opts ...ClientOption) *Client {
+	if cc == nil {
+		panic("ClientConfig 必须设置")
+	}
+	for _, apply := range opts {
+		apply(cc)
 	}
 	if cc.Host == "" {
-		panic("Client Host 必须设置")
+		panic("ClientConfig Host 必须设置")
 	}
-	if cc.Name == "" {
-		panic("Client Label 必须设置")
+	return &Client{
+		cConf: cc,
 	}
-	if cc.CodeProperty == "" {
-		cc.CodeProperty = "code"
+}
+func (c *Client) SetServerConfig(sc *ServerConfig) *Client {
+	if sc == nil {
+		panic("ServerConfig 必须设置")
 	}
-	if cc.MessageProperty == "" {
-		cc.MessageProperty = "message"
+	if sc.Name == "" {
+		panic("ServerConfig Name 必须设置")
 	}
-	if cc.DataProperty == "" {
-		cc.DataProperty = "data"
+	if sc.ApplicationName == "" {
+		panic("ServerConfig ApplicationName 必须设置")
 	}
-	if cc.SystemProperty == "" {
-		cc.SystemProperty = "system"
+	if sc.CodeProperty == "" {
+		sc.CodeProperty = "code"
 	}
-	if cc.ChainProperty == "" {
-		cc.ChainProperty = "chain"
+	if sc.MessageProperty == "" {
+		sc.MessageProperty = "message"
 	}
-	if cc.SucceedCode == nil {
-		cc.SucceedCode = "00"
+	if sc.DataProperty == "" {
+		sc.DataProperty = "data"
 	}
-	if cc.InternalErrorCode == nil {
-		cc.InternalErrorCode = "500"
+	if sc.SystemProperty == "" {
+		sc.SystemProperty = "system"
 	}
-	return &Client{cc}
+	if sc.ChainProperty == "" {
+		sc.ChainProperty = "chain"
+	}
+	if sc.SucceedCode == nil {
+		sc.SucceedCode = "00"
+	}
+	c.sConf = sc
+	return c
 }
 
-func NewClientWithConfig(server string, name string, port string, c *config.Config) *Client {
-	host := "http://127.0.0.1:" + port
-	if ns := c.GetString("cluster.namespace"); ns != "" {
-		host = server + "." + c.GetString("cluster.namespace")
-		if dnsSuffix := c.GetString("cluster.dnsSuffix"); dnsSuffix != "" {
-			host = host + "." + dnsSuffix
-			port = "80"
-			host = "http://" + host + ":" + port
+func NewClientWithConfig(prefixKey string, c *config.Config, opts ...ClientOption) *Client {
+	cc := &ClientConfig{
+		Host: c.GetString(prefixKey + ".host"),
+	}
+	username := c.GetString(prefixKey + ".basicAuth.username")
+	password := c.GetString(prefixKey + ".basicAuth.password")
+	if username != "" && password != "" {
+		cc.BasicAuth = &BasicAuth{
+			Username: username,
+			Password: password,
 		}
 	}
-	clientConfig := &ClientConfig{
-		Server: server,
-		Name:   name,
-		Host:   host,
-	}
-	if c.GetString("internal.basicAuth.username") != "" && c.GetString("internal.basicAuth.password") != "" {
-		clientConfig.BasicAuth = &BasicAuth{
-			Username: c.GetString("internal.basicAuth.username"),
-			Password: c.GetString("internal.basicAuth.password"),
-		}
-	}
-	return NewClient(clientConfig)
+	return NewClient(cc, opts...)
 }
 
-type RequestConfig struct {
-	Ctx context.Context
+type NilDataStrategy = int8
+
+const (
+	NilDataStrategyForbidden NilDataStrategy = 0
+	NilDataStrategyWithNew   NilDataStrategy = 1
+	NilDataStrategyAllow     NilDataStrategy = 2
+)
+
+type ServiceConfig struct {
+	NilDataStrategy
 }
+type ServiceOption func(*ServiceConfig)
 
-type RequestOption func(*RequestConfig)
-
-func WithCtx(val context.Context) RequestOption {
-	return func(opts *RequestConfig) {
-		opts.Ctx = val
+func WithNilDataStrategy(val NilDataStrategy) ServiceOption {
+	return func(opts *ServiceConfig) {
+		opts.NilDataStrategy = val
 	}
 }
 
@@ -126,10 +152,11 @@ type Service[Q any, S any] struct {
 	name   string
 	path   string
 	method string
+	sConf  *ServiceConfig
 }
 
-func NewService[Q any, S any](client *Client, name, path string, methods ...string) *Service[Q, S] {
-	if client == nil {
+func NewService[Q any, S any](c *Client, name, path, method string, opts ...ServiceOption) func(ctx context.Context, req *Q, opts ...Option) (*S, error) {
+	if c == nil {
 		panic("Service Client 必须设置")
 	}
 	if name == "" {
@@ -138,25 +165,39 @@ func NewService[Q any, S any](client *Client, name, path string, methods ...stri
 	if path == "" {
 		panic("Service Path 必须设置")
 	}
-	var method = "POST"
-	if len(methods) > 0 {
-		method = methods[0]
+	if method == "" {
+		panic("Service Method 必须设置")
 	}
-	return &Service[Q, S]{
-		c:      client,
+
+	sc := &ServiceConfig{}
+	for _, apply := range opts {
+		apply(sc)
+	}
+
+	service := &Service[Q, S]{
+		c:      c,
 		name:   name,
 		path:   path,
 		method: method,
+		sConf:  sc,
 	}
+	return service.Request
 }
 
-func (s *Service[Q, S]) Request(req *Q, opts ...RequestOption) (*S, error) {
+type RequestConfig struct {
+}
+
+type Option func(*RequestConfig)
+
+func (s *Service[Q, S]) Request(ctx context.Context, req *Q, opts ...Option) (*S, error) {
 	var err error
 	rc := &RequestConfig{}
 	for _, apply := range opts {
 		apply(rc)
 	}
-	headers, span := s.trace(rc.Ctx)
+
+	var headers = make(map[string]string)
+	span := s.trace(ctx, headers)
 	defer func() {
 		if span != nil {
 			if err != nil {
@@ -170,74 +211,73 @@ func (s *Service[Q, S]) Request(req *Q, opts ...RequestOption) (*S, error) {
 		}
 	}()
 
-	request := resty.New().R()
-	request = request.SetHeaders(headers)
-	if s.c.BasicAuth != nil {
-		request = request.SetBasicAuth(s.c.Username, s.c.Password)
-	}
-	if s.c.Signer != nil {
-		data, err := mapUtil.FromStruct(req)
+	if s.c.sConf.Signer != nil {
+		sign, err := s.c.sConf.Sign(req)
 		if err != nil {
-			return nil, ErrorParams.Clone().WithMsgArgs(s.c.Name, err)
+			return nil, ErrorSign.Clone().SetCause(err).SetMsgArgs(s.c.sConf.Name, s.name)
 		}
-		if s.c.ClientId != "" {
-			data["appId"] = s.c.ClientId
+		if err := structUtil.SetValue(req, s.c.sConf.Property(), sign); err != nil {
+			return nil, ErrorSign.Clone().SetCause(err).SetMsgArgs(s.c.sConf.Name, s.name)
 		}
-		s.c.Sign(data)
-		request = request.SetBody(data)
-	} else {
-		request = request.SetBody(req)
 	}
 
-	resp, err := request.Execute(strings.ToUpper(s.method), s.c.Host+s.path)
+	client := resty.New()
+	if s.c.cConf.Timeout != 0 {
+		client.SetTimeout(s.c.cConf.Timeout)
+	}
+	if s.c.cConf.BasicAuth != nil {
+		client.SetBasicAuth(s.c.cConf.Username, s.c.cConf.Password)
+	}
+	request := client.R().SetHeaders(headers).SetBody(req)
+	resp, err := request.Execute(strings.ToUpper(s.method), s.c.cConf.Host+s.path)
 	if err != nil {
-		return nil, ErrorRequest.Clone().WithMsgArgs(s.c.Name, err).WithChain(s.c.Server)
+		return nil, ErrorRequest.Clone().SetCause(err).SetMsgArgs(s.c.sConf.Name, s.name, err).SetChain(s.c.sConf.ApplicationName)
 	}
 
-	body := string(resp.Body())
-	code := gjson.Get(body, s.c.CodeProperty).Value()
-
+	code := gjson.GetBytes(resp.Body(), s.c.sConf.CodeProperty).Value()
 	if code == nil {
-		return nil, ErrorResponse.Clone().WithMsgArgs(s.c.Name, "无效应答码").WithChain(s.c.Server)
+		return nil, ErrorResponse.Clone().SetMsgArgs(s.c.sConf.Name, s.name).SetChain(s.c.sConf.ApplicationName)
 	}
 
-	message := gjson.Get(body, s.c.MessageProperty).String()
-	system := gjson.Get(body, s.c.SystemProperty).Bool()
-	chain := gjson.Get(body, s.c.ChainProperty).Array()
 	var chainArr = make([]string, 0)
-	if chain != nil {
+	if chain := gjson.GetBytes(resp.Body(), s.c.sConf.ChainProperty).Array(); chain != nil {
 		for _, v := range chain {
 			chainArr = append(chainArr, v.String())
 		}
 	}
-	chainArr = append(chainArr, s.c.Server)
-	if fmt.Sprint(code) != fmt.Sprint(s.c.SucceedCode) {
-		var e *baseError.Error
-		if code == s.c.InternalErrorCode {
-			e = ErrorInternal.Clone().WithMsgArgs(s.c.Name, message)
-		} else {
-			e = baseError.NewCode(fmt.Sprint(code), message)
-			if system {
-				e = e.WithSystem()
-			}
+	chainArr = append(chainArr, s.c.sConf.ApplicationName)
+
+	message := gjson.GetBytes(resp.Body(), s.c.sConf.MessageProperty).String()
+	system := gjson.GetBytes(resp.Body(), s.c.sConf.SystemProperty).Bool()
+	if fmt.Sprint(code) != fmt.Sprint(s.c.sConf.SucceedCode) {
+		var e = baseError.NewCode(fmt.Sprint(code), message)
+		if system {
+			e = e.SetSystem()
 		}
-		return nil, e.WithChain(chainArr...)
+		return nil, e.SetChain(chainArr...)
 	}
 
 	res := new(S)
 	if reflect.TypeOf(res).String() == "*types.Nil" {
 		return nil, nil
 	}
-
-	bodyData := gjson.Get(body, s.c.DataProperty).Value()
+	bodyData := gjson.GetBytes(resp.Body(), s.c.sConf.DataProperty).Value()
+	if bodyData == nil {
+		if s.sConf.NilDataStrategy == NilDataStrategyForbidden {
+			return nil, ErrorDataNil.Clone().SetMsgArgs(s.c.sConf.Name, s.name).SetChain(chainArr...)
+		} else if s.sConf.NilDataStrategy == NilDataStrategyWithNew {
+			return res, nil
+		} else {
+			return nil, nil
+		}
+	}
 	if err := mapUtil.ToStruct(bodyData, res); err != nil {
-		return nil, ErrorData.Clone().WithMsgArgs(s.c.Name).WithChain(chainArr...)
+		return nil, ErrorDataUnmarshal.Clone().SetCause(err).SetMsgArgs(s.c.sConf.Name, s.name).SetChain(chainArr...)
 	}
 	return res, nil
 }
 
-func (s *Service[Q, S]) trace(ctx context.Context) (map[string]string, opentracing.Span) {
-	var headers = make(map[string]string)
+func (s *Service[Q, S]) trace(ctx context.Context, headers map[string]string) opentracing.Span {
 	if ctx != nil {
 		var requestId = ""
 		if id := ctx.Value("x-request-id"); id != nil {
@@ -250,7 +290,7 @@ func (s *Service[Q, S]) trace(ctx context.Context) (map[string]string, opentraci
 			span.SetTag("x-request-id", requestId)
 			ext.SpanKindRPCClient.Set(span)
 			ext.HTTPMethod.Set(span, s.method)
-			ext.HTTPUrl.Set(span, s.c.Host+s.path)
+			ext.HTTPUrl.Set(span, s.c.cConf.Host+s.path)
 			if err := span.Tracer().Inject(
 				span.Context(),
 				opentracing.TextMap,
@@ -259,7 +299,7 @@ func (s *Service[Q, S]) trace(ctx context.Context) (map[string]string, opentraci
 				fmt.Println("RPCClientTrace Inject Err", err)
 			}
 		}
-		return headers, span
+		return span
 	}
-	return headers, nil
+	return nil
 }
