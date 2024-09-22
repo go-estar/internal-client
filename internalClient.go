@@ -258,7 +258,8 @@ func (s *Service[Q, S]) Request(ctx context.Context, req *Q, opts ...Option) (*S
 	}
 
 	res := new(S)
-	if reflect.TypeOf(res).String() == "*types.Nil" {
+	resType := reflect.TypeOf(res).String()
+	if resType == "*types.Nil" {
 		return nil, nil
 	}
 	bodyData := gjson.GetBytes(resp.Body(), s.c.sConf.DataProperty).Value()
@@ -270,6 +271,11 @@ func (s *Service[Q, S]) Request(ctx context.Context, req *Q, opts ...Option) (*S
 		} else {
 			return nil, nil
 		}
+	}
+	if resType == "*string" {
+		v := bodyData.(string)
+		reflect.ValueOf(res).Elem().Set(reflect.ValueOf(v))
+		return res, nil
 	}
 	if err := mapUtil.ToStruct(bodyData, res); err != nil {
 		return nil, ErrorDataUnmarshal.Clone().SetCause(err).SetMsgArgs(s.c.sConf.Name, s.name).SetChain(chainArr...)
